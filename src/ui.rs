@@ -198,9 +198,9 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 
 fn draw_feed(frame: &mut Frame, area: Rect, app: &App) {
     let theme = &app.theme;
-    let deduped = app.deduplicated_articles();
+    let display = &app.cached_display;
 
-    if deduped.is_empty() {
+    if display.is_empty() {
         let msg = if app.articles.is_empty() {
             if app.is_fetching {
                 format!("  {} Fetching news...", app.spinner_char())
@@ -238,10 +238,11 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &App) {
         )
         .height(1);
 
-    let rows: Vec<Row> = deduped
+    let rows: Vec<Row> = display
         .iter()
         .enumerate()
-        .map(|(i, (article, dup_count, _other_sources))| {
+        .map(|(i, row)| {
+            let article = &app.articles[row.article_idx];
             let is_selected = i == app.selected_index;
             let sentiment_indicator = article.sentiment.label();
 
@@ -260,8 +261,8 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &App) {
                 article.tickers.join(",")
             };
 
-            let title_text = if *dup_count > 0 {
-                format!("{} (+{})", article.title, dup_count)
+            let title_text = if row.dup_count > 0 {
+                format!("{} (+{})", article.title, row.dup_count)
             } else {
                 article.title.clone()
             };

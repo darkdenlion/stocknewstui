@@ -195,22 +195,22 @@ fn spawn_content_fetch(
 fn reload_articles(db: &Db, app: &mut App) {
     match app.filter_mode {
         FilterMode::All => {
-            if let Ok(articles) = db.get_articles(500) {
+            if let Ok(articles) = db.get_articles(100) {
                 app.articles = articles;
             }
         }
         FilterMode::Watchlist => {
-            if let Ok(articles) = db.get_articles_by_tickers(&app.watchlist, 500) {
+            if let Ok(articles) = db.get_articles_by_tickers(&app.watchlist, 100) {
                 app.articles = articles;
             }
         }
         FilterMode::Unread => {
-            if let Ok(articles) = db.get_unread_articles(500) {
+            if let Ok(articles) = db.get_unread_articles(100) {
                 app.articles = articles;
             }
         }
         FilterMode::Source => {
-            if let Ok(articles) = db.get_articles(500) {
+            if let Ok(articles) = db.get_articles(100) {
                 app.articles = articles;
             }
         }
@@ -344,7 +344,7 @@ fn handle_feed_key(
                 reload_articles(db, app);
             } else {
                 app.view_mode = ViewMode::Bookmarks;
-                if let Ok(articles) = db.get_bookmarked_articles(500) {
+                if let Ok(articles) = db.get_bookmarked_articles(100) {
                     app.articles = articles;
                     app.display_dirty = true;
                 }

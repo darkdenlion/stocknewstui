@@ -295,7 +295,7 @@ fn draw_feed(frame: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(14),
         Constraint::Length(8),
         Constraint::Min(20),
-        Constraint::Length(16),
+        Constraint::Length(10),
     ];
 
     let table = Table::new(rows, widths)

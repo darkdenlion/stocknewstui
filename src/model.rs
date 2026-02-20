@@ -67,11 +67,6 @@ impl FeedSource {
                 enabled: true,
             },
             FeedSource {
-                name: "CNBC Indo All".to_string(),
-                url: "https://www.cnbcindonesia.com/rss".to_string(),
-                enabled: true,
-            },
-            FeedSource {
                 name: "Tempo Bisnis".to_string(),
                 url: "https://rss.tempo.co/bisnis".to_string(),
                 enabled: true,

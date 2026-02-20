@@ -62,23 +62,23 @@ impl FeedSource {
     pub fn defaults() -> Vec<FeedSource> {
         vec![
             FeedSource {
-                name: "Bisnis.com".to_string(),
-                url: "https://www.bisnis.com/rss".to_string(),
-                enabled: true,
-            },
-            FeedSource {
-                name: "Kontan".to_string(),
-                url: "https://www.kontan.co.id/rss".to_string(),
-                enabled: true,
-            },
-            FeedSource {
                 name: "CNBC Indo".to_string(),
                 url: "https://www.cnbcindonesia.com/market/rss".to_string(),
                 enabled: true,
             },
             FeedSource {
-                name: "IDNFinancials".to_string(),
-                url: "https://www.idnfinancials.com/rss".to_string(),
+                name: "CNBC Indo All".to_string(),
+                url: "https://www.cnbcindonesia.com/rss".to_string(),
+                enabled: true,
+            },
+            FeedSource {
+                name: "Tempo Bisnis".to_string(),
+                url: "https://rss.tempo.co/bisnis".to_string(),
+                enabled: true,
+            },
+            FeedSource {
+                name: "IDX Channel".to_string(),
+                url: "https://www.idxchannel.com/rss".to_string(),
                 enabled: true,
             },
         ]

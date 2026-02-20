@@ -1,8 +1,14 @@
 #![allow(dead_code)]
 
 use crate::model::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
+
+pub struct DisplayRow {
+    pub article_idx: usize,
+    pub dup_count: usize,
+    pub other_sources: Vec<String>,
+}
 
 #[derive(Debug, PartialEq)]
 pub enum InputMode {
@@ -128,9 +134,9 @@ pub struct App {
     pub source_edit_url: String,
     pub source_edit_index: Option<usize>,
 
-    // Deduplication
-    pub dedup_groups: Vec<(usize, Vec<usize>)>,
-    pub dedup_dirty: bool,
+    // Cached display (filtered + deduplicated)
+    pub cached_display: Vec<DisplayRow>,
+    pub display_dirty: bool,
 }
 
 impl App {
@@ -170,8 +176,8 @@ impl App {
             source_edit_name: String::new(),
             source_edit_url: String::new(),
             source_edit_index: None,
-            dedup_groups: Vec::new(),
-            dedup_dirty: true,
+            cached_display: Vec::new(),
+            display_dirty: true,
         }
     }
 
@@ -179,9 +185,10 @@ impl App {
         self.view_mode = ViewMode::Reader;
         self.reader_scroll = 0;
 
-        // Check cache first
-        if let Some(article) = self.articles.get(self.selected_index) {
-            if let Some(content) = self.content_cache.get(&article.url) {
+        // Check cache first (use display cache for correct article lookup)
+        let url = self.selected_article().map(|a| a.url.clone());
+        if let Some(url) = url {
+            if let Some(content) = self.content_cache.get(&url) {
                 self.reader_content = Some(content.clone());
                 self.content_loading = false;
             } else {
@@ -201,11 +208,13 @@ impl App {
         self.ticker_filter = ticker;
         self.selected_index = 0;
         self.scroll_offset = 0;
+        self.display_dirty = true;
     }
 
     pub fn select_next(&mut self) {
-        if !self.articles.is_empty() {
-            self.selected_index = (self.selected_index + 1).min(self.articles.len() - 1);
+        let len = self.cached_display.len();
+        if len > 0 {
+            self.selected_index = (self.selected_index + 1).min(len - 1);
         }
     }
 
@@ -221,13 +230,16 @@ impl App {
     }
 
     pub fn select_last(&mut self) {
-        if !self.articles.is_empty() {
-            self.selected_index = self.articles.len() - 1;
+        let len = self.cached_display.len();
+        if len > 0 {
+            self.selected_index = len - 1;
         }
     }
 
     pub fn selected_article(&self) -> Option<&Article> {
-        self.articles.get(self.selected_index)
+        self.cached_display
+            .get(self.selected_index)
+            .and_then(|row| self.articles.get(row.article_idx))
     }
 
     pub fn set_status(&mut self, msg: String) {
@@ -257,6 +269,7 @@ impl App {
         self.filter_mode = self.filter_mode.next();
         self.selected_index = 0;
         self.scroll_offset = 0;
+        self.display_dirty = true;
     }
 
     pub fn refresh_seconds_remaining(&self) -> u64 {
@@ -267,61 +280,6 @@ impl App {
             }
         }
         0
-    }
-
-    pub fn filtered_articles(&self) -> Vec<&Article> {
-        let filtered: Vec<&Article> = match self.filter_mode {
-            FilterMode::All => self.articles.iter().collect(),
-            FilterMode::Watchlist => {
-                if self.watchlist.is_empty() {
-                    self.articles.iter().collect()
-                } else {
-                    self.articles
-                        .iter()
-                        .filter(|a| {
-                            a.tickers.iter().any(|t| self.watchlist.contains(t))
-                                || self.watchlist.iter().any(|w| {
-                                    a.title.to_uppercase().contains(w)
-                                })
-                        })
-                        .collect()
-                }
-            }
-            FilterMode::Source => self.articles.iter().collect(),
-            FilterMode::Unread => self.articles.iter().filter(|a| !a.read).collect(),
-        };
-
-        // Apply ticker filter
-        let filtered = if let Some(ref ticker) = self.ticker_filter {
-            filtered
-                .into_iter()
-                .filter(|a| {
-                    a.tickers.iter().any(|t| t == ticker)
-                        || a.title.to_uppercase().contains(ticker.as_str())
-                })
-                .collect()
-        } else {
-            filtered
-        };
-
-        // Apply search query (searches title, tickers, and cached content)
-        if self.search_query.is_empty() {
-            filtered
-        } else {
-            let query = self.search_query.to_lowercase();
-            filtered
-                .into_iter()
-                .filter(|a| {
-                    a.title.to_lowercase().contains(&query)
-                        || a.tickers.iter().any(|t| t.to_lowercase().contains(&query))
-                        || self
-                            .content_cache
-                            .get(&a.url)
-                            .map(|c| c.to_lowercase().contains(&query))
-                            .unwrap_or(false)
-                })
-                .collect()
-        }
     }
 
     /// Get sources eligible for fetching (respects rate limits)
@@ -339,64 +297,124 @@ impl App {
             .collect()
     }
 
-    /// Recompute deduplication groups from current articles
-    pub fn recompute_dedup(&mut self) {
-        let threshold = 0.7;
-        let articles = &self.articles;
-        let mut consumed = vec![false; articles.len()];
-        let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
+    /// Recompute the cached display list (filtering + deduplication).
+    /// Called once when data changes, not on every render frame.
+    pub fn recompute_display(&mut self) {
+        // Pre-compute search query once
+        let search_lower = self.search_query.to_lowercase();
+        let has_search = !self.search_query.is_empty();
 
-        for i in 0..articles.len() {
-            if consumed[i] {
-                continue;
-            }
-            let mut dupes = Vec::new();
-            for j in (i + 1)..articles.len() {
-                if consumed[j] {
+        // Step 1: Filter articles to indices
+        let filtered_indices: Vec<usize> = (0..self.articles.len())
+            .filter(|&i| {
+                let a = &self.articles[i];
+                match self.filter_mode {
+                    FilterMode::All | FilterMode::Source => true,
+                    FilterMode::Watchlist => {
+                        if self.watchlist.is_empty() {
+                            true
+                        } else {
+                            a.tickers.iter().any(|t| self.watchlist.contains(t))
+                                || self
+                                    .watchlist
+                                    .iter()
+                                    .any(|w| a.title.to_uppercase().contains(w))
+                        }
+                    }
+                    FilterMode::Unread => !a.read,
+                }
+            })
+            .filter(|&i| {
+                if let Some(ref ticker) = self.ticker_filter {
+                    let a = &self.articles[i];
+                    a.tickers.iter().any(|t| t == ticker)
+                        || a.title.to_uppercase().contains(ticker.as_str())
+                } else {
+                    true
+                }
+            })
+            .filter(|&i| {
+                if has_search {
+                    let a = &self.articles[i];
+                    a.title.to_lowercase().contains(&search_lower)
+                        || a.tickers
+                            .iter()
+                            .any(|t| t.to_lowercase().contains(&search_lower))
+                        || self
+                            .content_cache
+                            .get(&a.url)
+                            .map(|c| c.to_lowercase().contains(&search_lower))
+                            .unwrap_or(false)
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        // Step 2: Deduplicate with pre-computed normalized titles
+        if filtered_indices.len() <= 1 {
+            self.cached_display = filtered_indices
+                .into_iter()
+                .map(|idx| DisplayRow {
+                    article_idx: idx,
+                    dup_count: 0,
+                    other_sources: vec![],
+                })
+                .collect();
+        } else {
+            // Pre-compute normalized titles and word sets once
+            let normalized: Vec<String> = filtered_indices
+                .iter()
+                .map(|&idx| normalize_title(&self.articles[idx].title))
+                .collect();
+            let word_sets: Vec<HashSet<&str>> = normalized
+                .iter()
+                .map(|n| n.split_whitespace().collect())
+                .collect();
+
+            let threshold = 0.7;
+            let mut consumed = vec![false; filtered_indices.len()];
+            let mut result = Vec::new();
+
+            for i in 0..filtered_indices.len() {
+                if consumed[i] {
                     continue;
                 }
-                if title_similarity(&articles[i].title, &articles[j].title) >= threshold {
-                    dupes.push(j);
-                    consumed[j] = true;
+                let mut other_sources = Vec::new();
+                for j in (i + 1)..filtered_indices.len() {
+                    if consumed[j] {
+                        continue;
+                    }
+                    if !word_sets[i].is_empty() && !word_sets[j].is_empty() {
+                        let intersection =
+                            word_sets[i].intersection(&word_sets[j]).count() as f64;
+                        let union = word_sets[i].union(&word_sets[j]).count() as f64;
+                        if union > 0.0 && (intersection / union) >= threshold {
+                            other_sources
+                                .push(self.articles[filtered_indices[j]].source.clone());
+                            consumed[j] = true;
+                        }
+                    }
                 }
+                let dup_count = other_sources.len();
+                result.push(DisplayRow {
+                    article_idx: filtered_indices[i],
+                    dup_count,
+                    other_sources,
+                });
             }
-            groups.push((i, dupes));
+
+            self.cached_display = result;
         }
 
-        self.dedup_groups = groups;
-        self.dedup_dirty = false;
-    }
-
-    /// Get deduplicated filtered articles for display.
-    /// Returns (article_ref, duplicate_count, other_sources).
-    pub fn deduplicated_articles(&self) -> Vec<(&Article, usize, Vec<String>)> {
-        let filtered = self.filtered_articles();
-        if filtered.len() <= 1 {
-            return filtered.into_iter().map(|a| (a, 0, vec![])).collect();
+        // Keep selected_index in bounds
+        if self.cached_display.is_empty() {
+            self.selected_index = 0;
+        } else if self.selected_index >= self.cached_display.len() {
+            self.selected_index = self.cached_display.len() - 1;
         }
 
-        let threshold = 0.7;
-        let mut consumed = vec![false; filtered.len()];
-        let mut result = Vec::new();
-
-        for i in 0..filtered.len() {
-            if consumed[i] {
-                continue;
-            }
-            let mut other_sources = Vec::new();
-            for j in (i + 1)..filtered.len() {
-                if consumed[j] {
-                    continue;
-                }
-                if title_similarity(&filtered[i].title, &filtered[j].title) >= threshold {
-                    other_sources.push(filtered[j].source.clone());
-                    consumed[j] = true;
-                }
-            }
-            let count = other_sources.len();
-            result.push((filtered[i], count, other_sources));
-        }
-        result
+        self.display_dirty = false;
     }
 
     // Source management

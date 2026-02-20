@@ -53,6 +53,11 @@ pub fn run_loop(
     }
 
     loop {
+        // Recompute display cache if data changed (filter + dedup)
+        if app.display_dirty {
+            app.recompute_display();
+        }
+
         // Render
         terminal.draw(|f| ui::draw(f, &app))?;
 
@@ -213,12 +218,7 @@ fn reload_articles(db: &Db, app: &mut App) {
 
     app.total_articles = db.article_count().unwrap_or(0);
     app.unread_count = db.unread_count().unwrap_or(0);
-    app.dedup_dirty = true;
-
-    // Keep selected_index in bounds
-    if app.selected_index >= app.articles.len() && !app.articles.is_empty() {
-        app.selected_index = app.articles.len() - 1;
-    }
+    app.display_dirty = true;
 }
 
 fn handle_key(
@@ -292,10 +292,9 @@ fn handle_feed_key(
 
         // Open reader with content fetch
         KeyCode::Enter => {
-            if let Some(article) = app.articles.get(app.selected_index) {
-                let _ = db.mark_read(article.id);
-                let url = article.url.clone();
-                let article_id = article.id;
+            let article_data = app.selected_article().map(|a| (a.id, a.url.clone()));
+            if let Some((article_id, url)) = article_data {
+                let _ = db.mark_read(article_id);
                 app.enter_reader();
                 // Check DB for content, then network fetch
                 if app.reader_content.is_none() {
@@ -313,9 +312,9 @@ fn handle_feed_key(
 
         // Open in browser
         KeyCode::Char('o') => {
-            if let Some(article) = app.selected_article() {
-                let url = article.url.clone();
-                let _ = db.mark_read(article.id);
+            let article_data = app.selected_article().map(|a| (a.id, a.url.clone()));
+            if let Some((id, url)) = article_data {
+                let _ = db.mark_read(id);
                 let _ = open::that(&url);
                 app.set_status("Opened in browser".to_string());
                 reload_articles(db, app);
@@ -324,8 +323,9 @@ fn handle_feed_key(
 
         // Bookmark
         KeyCode::Char('b') => {
-            if let Some(article) = app.articles.get(app.selected_index) {
-                if let Ok(bookmarked) = db.toggle_bookmark(article.id) {
+            let article_id = app.selected_article().map(|a| a.id);
+            if let Some(id) = article_id {
+                if let Ok(bookmarked) = db.toggle_bookmark(id) {
                     let msg = if bookmarked {
                         "Bookmarked"
                     } else {
@@ -341,10 +341,12 @@ fn handle_feed_key(
         KeyCode::Char('B') => {
             if app.view_mode == ViewMode::Bookmarks {
                 app.view_mode = ViewMode::Feed;
+                reload_articles(db, app);
             } else {
                 app.view_mode = ViewMode::Bookmarks;
                 if let Ok(articles) = db.get_bookmarked_articles(500) {
                     app.articles = articles;
+                    app.display_dirty = true;
                 }
                 app.selected_index = 0;
             }
@@ -365,13 +367,14 @@ fn handle_feed_key(
 
         // Quick ticker filter: pick first ticker from selected article
         KeyCode::Char('T') => {
-            if let Some(article) = app.selected_article() {
-                if let Some(ticker) = article.tickers.first().cloned() {
-                    app.set_ticker_filter(Some(ticker.clone()));
-                    app.set_status(format!("Ticker filter: {}", ticker));
-                } else {
-                    app.set_status("No ticker detected in this article".to_string());
-                }
+            let ticker = app
+                .selected_article()
+                .and_then(|a| a.tickers.first().cloned());
+            if let Some(ticker) = ticker {
+                app.set_ticker_filter(Some(ticker.clone()));
+                app.set_status(format!("Ticker filter: {}", ticker));
+            } else {
+                app.set_status("No ticker detected in this article".to_string());
             }
         }
 
@@ -476,8 +479,9 @@ fn handle_reader_key(
 
         // Bookmark
         KeyCode::Char('b') => {
-            if let Some(article) = app.articles.get(app.selected_index) {
-                if let Ok(bookmarked) = db.toggle_bookmark(article.id) {
+            let article_id = app.selected_article().map(|a| a.id);
+            if let Some(id) = article_id {
+                if let Ok(bookmarked) = db.toggle_bookmark(id) {
                     let msg = if bookmarked {
                         "Bookmarked"
                     } else {
@@ -491,14 +495,15 @@ fn handle_reader_key(
 
         // Ticker filter from reader
         KeyCode::Char('T') => {
-            if let Some(article) = app.selected_article() {
-                if let Some(ticker) = article.tickers.first().cloned() {
-                    app.set_ticker_filter(Some(ticker.clone()));
-                    app.view_mode = ViewMode::Feed;
-                    app.reader_content = None;
-                    app.reader_scroll = 0;
-                    app.set_status(format!("Ticker filter: {}", ticker));
-                }
+            let ticker = app
+                .selected_article()
+                .and_then(|a| a.tickers.first().cloned());
+            if let Some(ticker) = ticker {
+                app.set_ticker_filter(Some(ticker.clone()));
+                app.view_mode = ViewMode::Feed;
+                app.reader_content = None;
+                app.reader_scroll = 0;
+                app.set_status(format!("Ticker filter: {}", ticker));
             }
         }
 
@@ -637,10 +642,9 @@ fn open_reader_with_content(
     content_tx: &mpsc::Sender<ContentMsg>,
     db: &Db,
 ) {
-    if let Some(article) = app.articles.get(app.selected_index) {
-        let _ = db.mark_read(article.id);
-        let url = article.url.clone();
-        let article_id = article.id;
+    let article_data = app.selected_article().map(|a| (a.id, a.url.clone()));
+    if let Some((article_id, url)) = article_data {
+        let _ = db.mark_read(article_id);
         app.enter_reader();
         if app.reader_content.is_none() {
             if let Ok(Some(content)) = db.get_content(article_id) {
@@ -662,6 +666,7 @@ fn handle_search_key(app: &mut App, key: event::KeyEvent, _db: &Db) {
             app.input_mode = InputMode::Normal;
             app.input_buffer.clear();
             app.selected_index = 0;
+            app.display_dirty = true;
             if app.search_query.is_empty() {
                 app.set_status("Search cleared".to_string());
             } else {
@@ -673,6 +678,7 @@ fn handle_search_key(app: &mut App, key: event::KeyEvent, _db: &Db) {
             app.input_buffer.clear();
             app.search_query.clear();
             app.selected_index = 0;
+            app.display_dirty = true;
         }
         KeyCode::Backspace => {
             app.input_buffer.pop();
